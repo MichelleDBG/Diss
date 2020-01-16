@@ -1,0 +1,880 @@
+---
+title: "Crawford etal code"
+author: "Michelle DePrenger-Levin"
+date: "May 28, 2019"
+output: html_document
+---
+#------------------------------------------------------------------------------------------------------------------# 
+##########Estimation phase: integrated model of two mark-recapture datasets############## 
+#------------------------------------------------------------------------------------------------------------------# 
+```{r}
+library(lattice)
+library(coda)
+library(R2jags)
+```
+
+#--------------------------------------------------#
+###Import data and specify robust sampling design### 
+#--------------------------------------------------#
+```{r}
+terpRD <- read.csv("TerpRD.csv") #capture history data from seining (2010-2015)
+cov <- read.csv("Tide_temp_cov.csv") #Tide covariates for sampling occasions
+z.data <- read.csv("z_known.csv") #known inclusion states based on capture histories
+f.data <- read.csv("f_known.csv") #known fidelity (availability) states based on capture histories
+
+#Sampling information and covariates
+n1 = 8                           #n1 = number of primary periods
+n2 = 18                          #n2 = number of total secondary sampling periods
+nss = c(0,0,3,3,3,3,3,3)         # nss[i] = number of secondary periods in primary period i 
+cnss = c(0,0,0,3,6,9,12,15)      # cnss[i] = cumulative sum of nss from 1 to i-1 
+tide = cov$cov_tide
+terpRD <- terpRD[,1:21]
+sign <- c(-1,-1,-1,-1,-1,1,1,1)
+
+#Augment dataset and produce data file for individual sex (sex) and capture histories (yaug) 
+nz <- 5 * 250 #sets number of augmented '0' rows to 4 times the number of observed individuals
+aug <-  array(0,dim = c(nz,length(terpRD[1,])))
+aug <-  as.data.frame(aug)
+names(aug) <- names(terpRD) 
+yaug.rd <- rbind(terpRD,aug) 
+sex <-  yaug.rd[,1] #0 = male, 1 = female 
+yaug.rd <- yaug.rd[,4:21]
+
+aug.sub <- as.matrix(aug[,4:11]) 
+z.known <- as.matrix(z.data[,1:8]) 
+z.known <- rbind(z.known,aug.sub) 
+z.known[z.known == 0] <- NA
+
+z.inits <- z.known 
+z.inits[is.na(z.inits)] <- 1 
+z.inits[z.known == 1] <- NA 
+z.inits[,1] <- NA 
+z.inits[,2] <- 1
+
+s.known <- as.matrix(s.data[,1:8]) 
+s.known <- rbind(s.known,aug.sub) 
+s.known[s.known == 0] <- NA
+
+s.inits <- s.known 
+s.inits[is.na(s.inits)] <- 1 
+s.inits[s.known == 1] <- NA 
+s.inits[,1:2] <- NA
+
+w.rd.inits <- rep(1, nrow(yaug.rd))
+```
+#------------------------------------------------------# 
+###Import data for multistate CR study---------### 
+#------------------------------------------------------# 
+terpLD <- read.csv("Terp_LD_4states.csv") #the data
+
+#Augment dataset and produce data file for individual sex (sex) and capture histories (yaug) 
+nz <- 4 * length(terpLD[,1]) #sets number of augmented '0' rows to 4 times the number of observed individuals
+aug <- array(4,dim = c(nz, length(terpLD[1,])))
+aug <- as.data.frame(aug) 
+names(aug) <- names(terpLD) 
+yaug.ld <- rbind(terpLD, aug)
+
+#Create z known data 
+z.ld.known <- as.matrix(yaug.ld) 
+z.ld.known[z.ld.known  == 4] <- NA 
+z.ld.known[z.ld.known  == 3] <- 5 
+z.ld.known[z.ld.known  == 2] <- 3 
+z.ld.known[z.ld.known  == 1] <- 2
+
+
+#Compute year of known death and refine z.ld.known states to be fixed in dead state after observed dead on road
+d <- which(z.ld.known  == 5, arr.ind = T)
+
+for (i in 1:nrow(d)){
+  ifelse(d[i,2]!= ncol(z.ld.known), z.ld.known[d[i,1], (d[i,2]+1):ncol(z.ld.known)] <- 6, next)}
+
+#Create good initial values for z 
+z.ld.inits <- z.ld.known 
+z.ld.inits[is.na(z.ld.inits)] <- 1 
+z.ld.inits[z.ld.known  == 2] <- 9 
+z.ld.inits[z.ld.known  == 3] <- 9 
+z.ld.inits[z.ld.known  == 5] <- 9 
+z.ld.inits[z.ld.known  == 6] <- 9
+
+first <- array(NA, dim = nrow(z.ld.inits))
+for (i in 1:nrow(z.ld.inits)){ #Function creates vector of occasion of first observation, and replaces any unobserved states after first observation to 4
+  ifelse(sum(z.ld.inits[i,])!= 8,first[i] <- min(which(z.ld.inits[i,]  == 9)), next)} 
+first[is.na(first)] <- 8
+for (i in 1:nrow(z.ld.inits)){
+  for (t in (first[i]+1):ncol(z.ld.inits)){ 
+    ifelse(first[i]!= 8,
+           ifelse(z.ld.inits[i,t]!=9, z.ld.inits[i,t] <- 4, next),next)}} 
+z.ld.inits[z.ld.inits   ==  9] <- NA
+z.ld.inits[,1] <- NA
+
+w.ld.inits <- rep(1, nrow(yaug.ld))
+
+
+#-------------------------------------------------------# 
+###The model: Robust design & Multistate### 
+#-------------------------------------------------------#
+sink("ipm.jags") 
+cat("
+                     model{
+                     # RD model-------------------------------------
+                     # Survival: Fixed effect for group (M/F) with year factor pre and post sign mgmt (2010-2012/2013-2014) and random year effect
+                     # Fidelity (gamma): fixed group, random year effects
+                     # Capture: Fixed effect for group, random temporal effect, and fixed effect of tide amplitude 
+                     # Recapture: = capture
+                     # Inclusion (omega): Constant
+
+                     #LD model-------------------------------------- 
+                     # Parameters:
+                     # s.c: survival probability of crossing terrapins
+                     # s.nc: survival probability of non-crossing terrapins
+                     # b: entry probability
+                     # gamma: fidelity (1-temporary emigration) probability
+                     # c: crossing status fidelity
+                     # r: recovery probability
+                     # p: capture probability 
+                     #
+                     # States (S):
+                     # 1 not yet entered
+                     # 2 alive crossing
+                     # 3 alive not crossing
+                     # 4 alive unavailable
+                     # 5 dead crossing
+                     # 6 dead not crossing 
+                     #
+                     # Observations (O):
+                     # 1 seen alive crossing
+                     # 2 seen alive not crossing
+                     # 3 recovered dead
+                     # 4 not seen or recovered 
+                     #--------------------------------------
+                     
+                     #-------------
+                     #Section 1. Define priors for all parameters#
+                     #-------------
+                     #---------Shared parameters: survival, entry, and temporary emigration
+                     #Survival parameters 
+                     for (i in 1:M) {
+                     g[i] <- sex[i]+1
+                     for (y in 1:(n1-1)){ 
+                     phi[i,y] <- phi.g[g[i],y] 
+                     } #y
+                     } #i
+
+                     for (u in 1:2) { #RD data with two sexes
+                     for (y in 1:(n1-1)){
+                     phi.eta.rd[u,y] <- phi.mu[u] + delta[u]*sign[y] + phi.eps[u,y] 
+                     phi.g[u,y] <- 1/(1+exp(-phi.eta.rd[u,y]))
+                     phi.eps[u,y] ~ dnorm(0,phi.tau[u])
+                     } #y
+                     phi.mean[u] ~ dunif(0,1)                              #Prior for mean survival 
+                     phi.mu[u] <- log(phi.mean[u]/(1-phi.mean[u]))       #logit transformation 
+                     phi.tau[u] <- pow(phi.sd[u],-2)
+                     phi.sd[u] ~ dunif(0,5)                                #Prior for sd survival
+                     } #u
+
+                     for (u in 1:2){
+                     for (y in 1:(n1-1)){                                  # LD data with females only
+                     phi.eta.ld[u,y] <- phi.mu[2] + phi.eps[2,y] + delta[2]*sign[y] + cr.effect[u] + cr.int[u]*sign[y]
+                                                                           #Crossing effect and interaction on survival 
+                     } #y
+                     } #u
+                     for (y in 1:(n1-1)){
+                     s.nc[y] <- 1/(1 + exp(-phi.eta.ld[1,y]))             # Prior for survival of non-crossing terps
+                     s.c[y] <- 1/(1 + exp(-phi.eta.ld[2,y]))              # Prior for survival of crossing terps
+                     } #y
+                     
+                     delta[1] <- 0
+                     delta[2] ~ dnorm(0, 0.37)                             #Prior for fixed effect for managed (sign) years 
+                     cr.effect[1] ~ dnorm(0, 0.37)                         #Prior for effect of not crossing on survival 
+                     cr.effect[2] <- -cr.effect[1]                       #Prior for effect of crossing on survival
+                     cr.int[1] ~ dnorm(0, 0.37)                            #Prior for interaction effect of not crossing on survival 
+                     cr.int[2] <- -cr.int[1]                             #Prior for interaction effect of crossing on survival
+                     
+                     #Entry probabilities
+
+                     for (i in 1:M) {
+                     for (y in 1:(n1-1)) { 
+                     nu[i,y] <- nu.g[g[i],y]                             # Use nu for RD model
+                     } #y
+                     } #i
+
+                     for (u in 1:2) {
+                     for (y in 1:(n1-1)) {
+                     ent[u,y] ~ dgamma(1, 1)                              # Dirichlet prior for entry probability
+                     b[u,y] <- ent[u,y] / sum(ent[u,1:(n1-1)])  
+                     } #y
+                     } #u
+
+                     for (u in 1:2) {
+                     nu.g[u, 1] <- b[u,1]                               #Use nu.g[2,] for LD model 
+                     for (y in 2:(n1 - 1)) {
+                     nu.g[u, y] <- b[u,y] / (1-sum(b[u, 1:(y - 1)]))
+                     } #y
+                     } #u
+
+                     #Temporary emigration
+
+                     for (i in 1:M) {
+                     for (y in 1:(n1 - 1)){
+                     gamma[i,y] <- gamma.g[g[i], y] 
+                     } #t
+                     } #i
+                     
+                     for (u in 1:2) {
+                     for (y in 1:(n1-1)){
+                     gamma.eta[u,y] <- gam.mu[u] + gam.eps[u,y]
+                     gamma.g[u,y] <- 1/(1+exp(-gamma.eta[u,y]))
+                     gam.eps[u,y] ~ dnorm(0,gam.tau[u])
+                     } #y
+                     gam.mean[u] ~ dunif(0,1)                            #Prior for mean fidelity 
+                     gam.mu[u] <- log(gam.mean[u]/(1-gam.mean[u]))     #logit transformation 
+                     gam.tau[u] <- pow(gam.sd[u],-2)
+                     gam.sd[u] ~ dunif(0,5)                              #Prior for sd fidelity
+                     } #u
+
+                     #---------Parameters of independent models
+                     #for RD model 
+                     #Capture parameters 
+                     for (i in 1:M) {
+                     for (t in 1:n2) { 
+                     p[i,t] <- p.g[g[i], t]
+                     } #t
+                     } #i
+                     
+                     for (u in 1:2){
+                     for (t in 1:n2) {
+                     p.eta[u,t] <- p.mu[u] + alpha*tide[t] + p.eps[t]  #capture with fixed group and fixed covariate effects
+                     p.g[u,t] <- 1/(1+exp(-p.eta[u,t]))                #back-transformed group and year-specific capture 
+                     } #t
+                     p.mean[u] ~ dunif(0,1)                              #Prior for mean survival
+                     p.mu[u] <- log(p.mean[u]/(1-p.mean[u]))           #logit transformation
+                     } #u
+                     for (t in 1:n2) {
+                     p.eps[t] ~ dnorm(0,p.tau)
+                     } #t
+                     p.tau <- pow(p.sd,-2)
+                     p.sd ~ dunif(0,5)
+                     alpha ~ dnorm(0,0.37)                               #Fixed effect for daily tide amplitude
+                     psi.rd ~ dunif(0,1)                                 #Prior for latent inclusion
+
+                     #for LD model
+                     for (y in 1:(n1-1)){ 
+                     p.c[y] <- mean.p.c 
+                     p.nc[y] <- mean.p.nc 
+                     c[y] <- mean.c
+                     r[y] <- mean.r
+                     } #y
+                    
+                     mean.p.c ~ dunif(0, 1)                              # Prior for mean capture 
+                     mean.p.nc ~ dunif(0, 1)                             # Prior for mean capture  # Prior for mean recovery probability
+                     mean.c ~ dunif(0, 1)                                # Prior for mean crossing status fidelity 
+                     mean.r ~ dunif(0,1)                                 # Prior for mean recovery probability
+                     psi.ld ~ dunif(0, 1)                                # Prior for latent inclusion
+
+                     #---------Define state-transition and observation matrices for live-dead model 
+                     for (i in 1:nind){
+                     # Define probabilities of state S(y+1) given S(y)
+                     for (y in 1:(n1-1)){
+                     
+                     ps[1,i,y,1] <- 1 - nu.g[2,y]
+                     ps[1,i,y,2] <- nu.g[2,y] * gamma.g[2,y] * c[y] * s.c[y]
+                     ps[1,i,y,3] <- nu.g[2,y] * gamma.g[2,y] * (1-c[y]) * s.nc[y]
+                     ps[1,i,y,4] <- nu.g[2,y] * (1-gamma.g[2,y]) * s.nc[y]
+                     ps[1,i,y,5] <- nu.g[2,y] * gamma.g[2,y] * c[y] * (1-s.c[y])
+                     ps[1,i,y,6] <- nu.g[2,y] * (1-gamma.g[2,y]) * (1-s.nc[y]) + nu.g[2,y] * gamma.g[2,y] * (1-c[y]) * (1-s.nc[y]) 
+                     
+                     ps[2,i,y,1] <- 0
+                     ps[2,i,y,2] <- gamma.g[2,y] * c[y] * s.c[y]
+                     ps[2,i,y,3] <- gamma.g[2,y] * (1-c[y]) * s.nc[y]
+                     ps[2,i,y,4] <- (1-gamma.g[2,y]) * s.nc[y]
+                     ps[2,i,y,5] <- gamma.g[2,y] * c[y] * (1-s.c[y])
+                     ps[2,i,y,6] <- (1-gamma.g[2,y]) * (1-s.nc[y]) + gamma.g[2,y] * (1-c[y]) * (1-s.nc[y])
+                     
+                     ps[3,i,y,1] <- 0
+                     ps[3,i,y,2] <- gamma.g[2,y] * c[y] * s.c[y]
+                     ps[3,i,y,3] <- gamma.g[2,y] * (1-c[y]) * s.nc[y]
+                     ps[3,i,y,4] <- (1-gamma.g[2,y]) * s.nc[y]
+                     ps[3,i,y,5] <- gamma.g[2,y] * c[y] * (1-s.c[y])
+                     ps[3,i,y,6] <- (1-gamma.g[2,y]) * (1-s.nc[y]) + gamma.g[2,y] * (1-c[y]) * (1-s.nc[y])
+                     
+                     ps[4,i,y,1] <- 0
+                     ps[4,i,y,2] <- gamma.g[2,y] * c[y] * s.c[y]
+                     ps[4,i,y,3] <- gamma.g[2,y] * (1-c[y]) * s.nc[y]
+                     ps[4,i,y,4] <- (1-gamma.g[2,y]) * s.nc[y]
+                     ps[4,i,y,5] <- gamma.g[2,y] * (1-s.c[y])
+                     ps[4,i,y,6] <- (1-gamma.g[2,y]) * (1-s.nc[y]) + gamma.g[2,y] * (1-c[y]) * (1-s.nc[y])
+                     
+                     ps[5,i,y,1] <- 0
+                     ps[5,i,y,2] <- 0
+                     ps[5,i,y,3] <- 0
+                     ps[5,i,y,4] <- 0
+                     ps[5,i,y,5] <- 0
+                     ps[5,i,y,6] <- 1 
+                                          
+                     ps[6,i,y,1] <- 0 
+                     ps[6,i,y,2] <- 0 
+                     ps[6,i,y,3] <- 0 
+                     ps[6,i,y,4] <- 0 
+                     ps[6,i,y,5] <- 0 
+                     ps[6,i,y,6] <- 1
+
+                     # Define probabilities of O(y) given S(y) 
+                     po[1,i,y,1] <- 0
+                     po[1,i,y,2] <- 0
+                     po[1,i,y,3] <- 0
+                     po[1,i,y,4] <- 1 
+
+                     po[2,i,y,1] <- p.c[y] 
+                     po[2,i,y,2] <- 0 
+                     po[2,i,y,3] <- 0 
+                     po[2,i,y,4] <- 1-p.c[y] 
+
+                     po[3,i,y,1] <- 0 
+                     po[3,i,y,2] <- p.nc[y] 
+                     po[3,i,y,3] <- 0 
+                     po[3,i,y,4] <- 1-p.nc[y] 
+
+                     po[4,i,y,1] <- 0 
+                     po[4,i,y,2] <- 0 
+                     po[4,i,y,3] <- 0 
+                     po[4,i,y,4] <- 1 
+
+                     po[5,i,y,1] <- 0 
+                     po[5,i,y,2] <- 0 
+                     po[5,i,y,3] <- r[y] 
+                     po[5,i,y,4] <- 1-r[y] 
+
+                     po[6,i,y,1] <- 0 
+                     po[6,i,y,2] <- 0 
+                     po[6,i,y,3] <- 0 
+                     po[6,i,y,4] <- 1
+                     } #y 
+                     } #i
+
+                     #-------------
+                     #Section 2. Likelihoods of single data sets# 
+                     #-------------
+                     #--------Robust design part 
+                     # State process #
+                     for (i in 1:M){
+                     w.rd[i] ~ dbern(psi.rd)                              # Inclusion parameter representing individual is real and not fake augmented row 
+                     z.rd[i,1] <- 0                                       # Make sure all individuals are in state 0 (not entered) at time 1
+                     s[i,1] <- 0                                          # However, availability is set to 0 in years before creek sampling started
+                     q[i,1] <- 1-z.rd[i,1]                                # Availability for recruitment
+                     mu1a[i,2] <- phi[i,1] * z.rd[i,1]                    # Prob surviving to t given alive at t-1
+                     mu1b[i,2] <- nu[i,1] * q[i,1]                        # Prob entering superpop given available
+                     mu1[i,2] <- mu1a[i,2] + mu1b[i,2] 
+                     z.rd[i,2] ~ dbern(mu1[i,2])
+                     s[i,2] <- 0
+                     
+                     # Subsequent year/occasion, state process
+                     for (y in 3:n1) { #Loop over primary periods (years)
+                     # State process
+                     q[i,y-1] <- 1-z.rd[i,y-1]                            # Availability for recruitment
+                     mu1a[i,y] <- phi[i,y-1] * z.rd[i,y-1]                # Prob surviving to t given alive at t-1
+                     mu1b[i,y] <- nu[i,y-1] * prod(q[i,1:(y-1)])          # Prob entering superpop given available
+                     mu1[i,y] <- mu1a[i,y] + mu1b[i,y]
+                     z.rd[i,y] ~ dbern(mu1[i,y])
+                     avail[i,y] <- gamma[i,y-1] * z.rd[i,y]               #changed 
+                     s[i,y] ~ dbern(avail[i,y])
+
+                     # Observation process
+                     for (j in 1:nss[y]) {                                #Loop over secondary periods (times / days) 
+                     y.rd[i,(cnss[y]+j)] ~ dbern(p.eff[i,(cnss[y]+j)]) 
+                     p.eff[i,(cnss[y]+j)] <- s[i,y] * p[i,(cnss[y]+j)] * w.rd[i]
+                     } #j secondary 
+                     } #y primary 
+                     } #i individual
+
+                     #--------Live-dead part
+                     # Likelihood
+                     for (i in 1:nind){
+                     # Define latent state at first occasion
+                     w.ld[i] ~ dbern(psi.ld)                              #Draw latent inclusion
+                     z.ld[i,1] <- 1                                     #Make sure all individuals are in state 1 (not entered) at time 1 
+                     for (y in 2:n1){
+                     # State process: draw S(y) given S(y-1) 
+                     z.ld[i,y] ~ dcat(ps[z.ld[i,y-1], i, y-1,])
+                     # Observation process: draw O(y) given S(y) 
+                     z.real[i,y] <- z.ld[i,y]*w.ld[i] + 4*(1-w.ld[i]) 
+                     y.ld[i,y] ~ dcat(po[z.real[i,y], i, y-1,])
+                     } #t
+                     } #i
+
+                     #---------
+                     #Section 3. Derived parameters# 
+                     #--------from RD model
+                     
+                     #Abundance
+                     for (i in 1:M) {
+                     for (t in 1:n1) {
+                     u.rd[i,t] <- z.rd[i,t] * w.rd[i]                 #Deflated latent state (u)
+                     } #t
+                     } #i
+                     
+                     for (t in 1:n1) {
+                     N.loc[t] <- sum(u.rd[1:M,t])                     # Annual superpop size
+                     N.loc.fem[t] <- inprod(sex[1:M], u.rd[1:M,t])    # Inner product operator -- sums of products of 2 vectors
+                     N.loc.male[t] <- N.loc[t] - N.loc.fem[t]
+                     } #t
+                     for (i in 1:M) {
+                     N.loc.ind[i] <- sum(u.rd[i, 2:n1])               
+                     N.loc.alive[i] <- 1-equals(N.loc.ind[i], 0) 
+                     } #i
+
+                     Nsuper.loc <- sum(N.loc.alive[])                 # Superpopulation size
+
+                     # From LD model: Calculate derived population parameters
+                     for (i in 1:nind){
+                     for (t in 1:n1){
+                     u.ld[i,t] <- z.ld[i,t] * w.ld[i]                #Deflated latent state (u)
+                     } #t   
+                     } #i
+                     
+                     for (i in 1:nind){
+                     for (t in 2:n1){
+                     al.c[i,t-1] <- equals(u.ld[i,t], 2)
+                     al.nc[i,t-1] <- equals(u.ld[i,t], 3)
+                     al.out[i,t-1] <- equals(u.ld[i,t], 4)
+                     d.c[i,t-1] <- equals(u.ld[i,t], 5)
+                     d.out[i,t-1] <- equals(u.ld[i,t], 6)
+                     } #t
+                     real[i] <- sum(al.c[i,]) + sum(al.nc[i,]) + sum(d.c[i,]) + sum(al.out[i,]) + sum(d.out[i,]) 
+                     } #i
+
+                     for (t in 1:(n1-1)){
+                     N.out[t] <- sum(al.out[,t]) 
+                     N.cross[t] <- sum(al.c[,t]) 
+                     N.nocross[t] <- sum(al.nc[,t]) 
+                     N.dead[t] <- sum(d.c[,t])
+                     } #t
+                     
+                     for (i in 1:nind){
+                     ind[i] <- 1-equals(real[i],0) 
+                     } #i
+  
+                     Nsuper.JIC <- sum(ind[])                        # Superpopulation size
+                     } #END OF MODEL
+                     ",fill=TRUE) 
+sink()
+
+#Bundle data
+ipm.data <-  
+  list(y.rd = yaug.rd,
+       sex  = sex,
+       M    = nrow(yaug.rd),
+       n1   = n1,
+       n2   = n2,
+       nss  = nss,
+       cnss = cnss,
+       tide = tide,
+       z.rd = z.known,
+       f    = f.known,
+       sign = sign, 
+       y.ld = yaug.ld, 
+       nind = nrow(yaug.ld), 
+       z.ld = z.ld.known)
+
+#Parameters monitored
+params <-  c("phi.mean",
+             "phi.sd",
+             "s.c",
+             "s.nc",
+             "delta",
+             "cr.effect",
+             "cr.int",
+             "p.mean",
+             "p.sd",
+             "mean.p.c",
+             "mean. p.nc",
+             "mean.c",
+             "mean.r",
+             "nu.g",
+             "gam.mean",
+             "gam.sd",
+             "psi.rd",
+             "psi.ld",
+             "N.loc.fem",
+             "N.loc.male" ,
+             "Nsuper.loc",
+             "Nsuper.JIC",
+             "N.out",
+             "N.cross",
+             "N.nocross",
+             "N.dead")
+
+#MCMC settings 
+ni <- 60000
+nt <- 1
+nb <- 50000 
+nc <- 1
+
+################### PARALLELIZE !!! #######################
+library(foreach)
+library(doParallel)
+library(R2jags); load.module("glm"); load.module("lecuyer")
+init.fun <- function() {
+  list(.RNG.name = "lecuyer::RngStream",
+       .RNG.seed = runif(1,1,1000000),
+       phi.mean = runif(2,0.5,1), phi.sd = runif(2,0,5), delta = c(NA, rnorm(1)),
+       cr.effect = c(rnorm(1),NA), cr.int = c(rnorm(1),NA),
+       gam.mean = runif(2,0,1), gam.sd = runif(2,0,5), p.mean = runif(2,0,1), p.sd = runif(1,0,5),
+       alpha=rnorm( 1), psi.rd = runif(1,0,1),
+       z.rd = z.inits, f = f.inits, w.rd = w.rd.inits, mean.p.c = runif(1,0,1), mean.p.nc = runif(1,0,1),
+       mean.c = runif(1,0,1), mean.r = runif(1,0,1), z.ld = z.ld.inits, w.ld = w.ld.inits)     ## Here are my initial values.
+}
+
+registerDoParallel(cl = 3, cores = 3)                                 ## Reserve the cores...
+mod.time <- system.time(
+  samp <- foreach(i=1:getDoParWorkers(),
+                  .export = c("jags", "as.mcmc.list", "load.module"), ### needed functions in {r2jags} need to be registered here
+                  .combine = "c",                                     ### tells foreach() how to put the different output objects together. Since coda.samples() creates an object of class "mcmc.list", using c() on the result objects (of which there are four in this case), will create a new list with four elements, that happens to have the right structure to serve as an "mcmc.list" object with four chains. Demonstration: try "L <- c(list(1:3), list(letters()))", then "class(L)".
+                  .final = mcmc.list, 
+                  .verbose = T) %dopar% {
+                    load.module("lecuyer")
+                    load.module("dic")
+                    IPM.LWBD <- jags(data = ipm.data,inits = init.fun, params, " ipm.jags",
+                                     n.chains = nc,n.thin = nt, n.iter = ni, n.burnin = nb, 
+                                     working.directory = getwd())
+                    result <- as.mcmc.list(IPM.LWBD$BUGSoutput)
+                    return(result)                                    ### each core will produce an object called "result", of class "mcmc.list"
+                  }
+) ###
+###################### END PARALLELIZE !!! ##########################
+
+IPM.jagsout <- rbind(samp[[1]],samp[[2]],samp[[3]]) 
+write.csv(IPM.jagsout,"C:/.../IPM.results.csv")                       #Save MCMC posterior samples to disk
+
+#------------------------------------------------------------------------------------------------------------------# 
+##########Prediction phase: stage-based PVA model for diamondback terrapins############ 
+#------------------------------------------------------------------------------------------------------------------# 
+#--------------------------------------------------#
+###Setup population model space###
+#--------------------------------------------------#
+#Load parameter estimates and management effects from files
+IPM <- read.csv("IPM.csv")                                            # Posterior parameter estimates (MCMC samples) from IPM 
+mgmt.effects <- read.csv("Management effects.csv")                    # Mgmt effects for each alternative strategy
+JIC.hab <- read.csv("JIC_habitat.csv")                                # Data for position along JIC, proportion of terrapins and habitat types by position
+JIC.nest <- read.csv("JIC_nest_surv.csv")                             # Nest survival estimates (J.C.M., unpubl. data), accounting for position on JIC and vegetation type
+
+#Specify params from mgmt effects table 
+p.mgmt <- mgmt.effects[,2]
+p.block <- mgmt.effects[,3]
+p.block.LCI <- mgmt.effects[,4] 
+p.block.UCI <- mgmt.effects[,5] 
+s.cross.eff <- mgmt.effects[,6]
+s.cross.eff <- log(s.cross.eff/(1-s.cross.eff)) 
+s.cross.eff.LCI <- mgmt.effects[,7]
+s.cross.eff.LCI <- log(s.cross.eff.LCI/(1-s.cross.eff.LCI)) 
+s.cross.eff.UCI <- mgmt.effects[,8]
+s.cross.eff.UCI <- log(s.cross.eff.UCI/(1-s.cross.eff.UCI))
+p.hab <- mgmt.effects[,12:14]
+s.nest <- mgmt.effects[,15:17]
+s.nest.LCI <- mgmt.effects[,18:20]
+s.nest.UCI <- mgmt.effects[,21:23]
+
+#Specify params from JIC.hab and JIC.nest.survival tables 
+position <- JIC.hab[,2]
+prop.Hedge <- JIC.hab[,12:20]
+prop.Box <- JIC.hab[,3:11]
+prop.Open <- 1-(prop.Hedge+prop.Box) 
+nest.survO <- JIC.nest[,11:19] 
+nest.survH <- JIC.nest[,2:10]
+
+#Specify PVA environmnet (iterations, years, scenarios)
+iter = 1000                                                       # Number of iterations per scenario/strategy
+n.yrs = 50                                                        # Number of years to project pop for each iteration
+strat <- dim(mgmt.effects)[1]                                     # Number of strategies to cycle through
+
+#Create blank containers
+##(Adult survival and stochasticity)
+s.M.ad <- array(dim=c(iter))
+s.F.ad <- array(dim=c(iter)) 
+s.M.ad.sd <- array(dim=c(iter)) 
+s.F.ad.sd <- array(dim=c(iter)) 
+s.M.ad.mu <- array(dim=c(iter)) 
+s.F.ad.mu <- array(dim=c(iter)) 
+cr.effect.1 <- array(dim=c(iter)) 
+cr.effect.2 <- array(dim=c(iter)) 
+delta.1 <- array(dim=c(iter)) 
+delta.2 <- array(dim=c(iter)) 
+s.M.yr.var <- array(dim=c(n.yrs,iter)) 
+s.F.yr.var <- array(dim=c(n.yrs,iter)) 
+s.M.ad.yr <- array(dim=c(n.yrs,iter,strat)) 
+s.F.cross <- array(dim=c(n.yrs,iter,strat)) 
+s.F.nocross <- array(dim=c(n.yrs,iter,strat)) 
+##(Recruitment [juvenile graduation prob]) 
+g.M.juv1 <- array(dim=c(n.yrs,iter)) 
+g.F.juv1 <- array(dim=c(n.yrs,iter))
+##(Remaining parameters for stage-based matrix) 
+gam <- array(dim=c(n.yrs,iter)) 
+p.cross <- array(dim=c(n.yrs,iter)) 
+M.juv <- array(dim=c(n.yrs+1,3,iter,strat)) 
+F.juv <- array(dim=c(n.yrs+1,3,iter,strat)) 
+N.nester <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nester.hab <- array(dim=c(n.yrs+1,3,iter,strat)) 
+N.nest.hab <- array(dim=c(n.yrs+1,3,iter,strat)) 
+N.position <- array(dim=c(n.yrs+1,87,iter,strat)) 
+N.nest <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nest.hab <- array(dim=c(n.yrs+1,87,iter,strat,3)) 
+N.nest.H.tot <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nest.B.tot <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nest.O.tot <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nest.H.surv.pos <- array(dim=c(n.yrs+1,87,iter,strat)) 
+N.nest.B.surv.pos <- array(dim=c(n.yrs+1,87,iter,strat)) 
+N.nest.O.surv.pos <- array(dim=c(n.yrs+1,87,iter,strat)) 
+N.nest.H.surv <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nest.B.surv <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nest.O.surv <- array(dim=c(n.yrs+1,iter,strat)) 
+nest.success.H <- array(dim=c(n.yrs+1,iter,strat)) 
+nest.success.B <- array(dim=c(n.yrs+1,iter,strat)) 
+nest.success.O <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nest.surv.hab <- array(dim=c(n.yrs+1,3,iter,strat)) 
+N.eggs.hab <- array(dim=c(n.yrs+1,3,iter,strat)) 
+N.eggs.surv.hab <- array(dim=c(n.yrs+1,3,iter,strat)) 
+N.M.new <- array(dim=c(n.yrs+1,3,iter,strat)) 
+N.F.new <- array(dim=c(n.yrs+1,3,iter,strat))
+N.F.start <- array(dim=c(n.yrs+1,iter,strat)) 
+N.F.cat <- array(dim=c(n.yrs+1,3,iter,strat)) 
+N.mgmt <- array(dim=c(n.yrs+1,iter,strat)) 
+N.block <- array(dim=c(n.yrs+1,iter,strat))
+N.cross <- array(dim=c(n.yrs+1,iter,strat)) 
+N.nocross <- array(dim=c(n.yrs+1,iter,strat)) 
+N.surv.cross <- array(dim=c(n.yrs+1,iter,strat)) 
+N.surv.nocross <- array(dim=c(n.yrs+1,iter,strat)) 
+N.surv.nouser <- array(dim=c(n.yrs+1,iter,strat)) 
+##(Population growth rate and persistence) 
+lambda <- array(dim=c(n.yrs,iter,strat))
+crash <- array(dim=c(iter,strat)) 
+mean.lambda.iter <- array(dim=c(iter,strat)) 
+mean.lambda.mgmt <- array(dim=strat) 
+perc.change.iter <- array(dim=c(iter,strat)) 
+perc.change.mgmt <- array(dim=strat) 
+persist <- array(dim=c(iter,strat)) 
+persistence <- array(dim=c(iter,strat)) 
+persistence.prob <- array(dim=strat)
+
+#Derive params from IPM estimates
+#-abundance
+N.loc.fem.avg <- mean(c(IPM$N.loc.fem.2,
+                        IPM$N.loc.fem.3,
+                        IPM$N.loc.fem.4,
+                        IPM$N.loc.fem.5,
+                        IPM$N.loc.fem6,
+                        IPM$N.loc.fem.7,
+                        IPM$N.loc.fem.8))
+N.loc.male.avg <- mean(c(IPM$N.loc.fem.2,
+                         IPM$N.loc.male.3,
+                         IPM$N.loc.male.4,
+                         IPM$N.loc.male.5,
+                         IPM$N.loc.male.6,
+                         IPM$N.loc.male.7,
+                         IPM$N.loc.male.8))
+sex.ratio <- N.loc.fem.avg/N.loc.male.avg
+N.JIC.fem <- cbind(IPM$N.cross.1 + IPM$N.nocross.1 + IPM$N.out.1,
+                   IPM$N.cross.2 + IPM$N.nocross.2 + IPM$N.out.2, 
+                   IPM$N.cross.3 + IPM$N.nocross.3 + IPM$N.out.3, 
+                   IPM$N.cross.4 + IPM$N.nocross.4 + IPM$N.out.4, 
+                   IPM$N.cross.5 + IPM$N.nocross.5 + IPM$N.out.5, 
+                   IPM$N.cross.6 + IPM$N.nocross.6 + IPM$N.out.6, 
+                   IPM$N.cross.7 + IPM$N.nocross.7 + IPM$N.out.7)
+N.JIC.fem <- round(mean(N.JIC.fem),0) 
+N.JIC.male <- round(N.JIC.fem*(1/sex.ratio),0)
+
+# survival
+#Simulate stochastic demographic survival rates from IPM estimates 
+for (i in 1:iter){
+  row[i] <- sample(row(IPM),1,replace=T) 
+  s.M.ad[i] <- IPM$phi.mean.1[row[i]] 
+  s.F.ad[i] <- IPM$phi.mean.2[row[i]] 
+  s.M.ad.sd[i] <- IPM$phi.sd.1[row[i]]
+  s.F.ad.sd[i] <- IPM$phi.sd.2[row[i]] 
+  cr.effect.1[i] <- IPM$cr.effect.1[row[i]]
+  cr.effect.2[i] <- IPM$cr.effect.2[row[i]] 
+  delta.1[i] <- IPM$delta.1[row[i]] 
+  delta.2[i] <- IPM$delta.2[row[i]]
+} #i
+for (i in 1:iter){
+  s.M.ad[i] <- sample(IPM$phi.mean.1,1,replace=T) 
+  s.F.ad[i] <- sample(IPM$phi.mean.2,1,replace=T) 
+  s.M.ad.sd[i] <- sample(IPM$phi.sd.1,1,replace=T) 
+  s.F.ad.sd[i] <- sample(IPM$phi.sd.2,1,replace=T) 
+  cr.effect.1[i] <- sample(IPM$cr.effect.1,1,replace=T) 
+  cr.effect.2[i] <- sample(IPM$cr.effect.2,1,replace=T) 
+  delta.1[i] <- sample(IPM$delta.1,1,replace=T) 
+  delta.2[i] <- sample(IPM$delta.2,1,replace=T)
+} #i
+
+for (t in 1:n.yrs){ 
+  for (i in 1:iter){
+    for (m in 1:strat){
+      s.M.ad.mu[i] <- log(s.M.ad[i]/(1-s.M.ad[i]))
+      s.M.yr.var[t,i] <- rnorm(1,0,s.M.ad.sd[i])
+      s.M.ad.yr[t,i,m] <- 1/(1+exp(-(s.M.ad.mu[i] + s.M.yr.var[t,i]))) 
+      s.F.ad.mu[i] <- log(s.F.ad[i]/(1-s.F.ad[i]))
+      s.F.yr.var[t,i] <- rnorm(1,0,s.F.ad.sd[i])
+    } #m
+    s.F.cross[t,i,1] <- 1/(1+exp(-(s.F.ad.mu[i] + s.F.yr.var[t,i] - delta.2[i] + cr.effect.2[i] +
+                                   s.cross.eff[1])))
+    s.F.nocross[t,i,1] <- 1/(1+exp(-(s.F.ad.mu[i] + s.F.yr.var[t,i] - delta.1[i] + cr.effect.1[i])))
+    for (m in 2:strat){
+      s.F.cross[t,i,m] <- 1/(1+exp(-(s.F.ad.mu[i] + s.F.yr.var[t,i] + cr.effect.2[i] + delta.2[i] +
+                                     s.cross.eff[m])))
+      s.F.nocross[t,i,m] <- 1/(1+exp(-(s.F.ad.mu[i] + s.F.yr.var[t,i] + cr.effect.1[i] + delta.1[i])))
+    } #m 
+  } #i
+} #t
+#-p.cross, gamma, and entry prob (recruitment) <- replaces graduation prob from juveniles to adults
+p.cross.yr <- cbind((IPM$N.cross.1+IPM$N.dead.1)/(IPM$N.cross.1+IPM$N.dead.1+IPM$N.nocross.1),
+                    (IPM$N.cross.2+IPM$N.dead.2)/(IPM$N.cross.2+IPM$N.dead.2+IPM$N.nocross.2), 
+                    (IPM$N.cross.3+IPM$N.dead.3)/(IPM$N.cross.3+IPM$N.dead.3+IPM$N.nocross.3), 
+                    (IPM$N.cross.4+IPM$N.dead.4)/(IPM$N.cross.4+IPM$N.dead.4+IPM$N.nocross.4), 
+                    (IPM$N.cross.5+IPM$N.dead.5)/(IPM$N.cross.5+IPM$N.dead.5+IPM$N.nocross.5), 
+                    (IPM$N.cross.6+IPM$N.dead.6)/(IPM$N.cross.6+IPM$N.dead.6+IPM$N.nocross.6),
+                    (IPM$N.cross.7+IPM$N.dead.7)/(IPM$N.cross.7+IPM$N.dead.7+IPM$N.nocross.7)) 
+p.cross.mean <- rowMeans(p.cross.yr)
+  nu.yr.M <- cbind(IPM$nu.g.1.1,IPM$nu.g.1.2,IPM$nu.g.1.3,IPM$nu.g.1.4,IPM$nu.g.1.5,IPM$nu.g.1.6) 
+  nu.mean.M <- rowMeans(nu.yr.M)
+  nu.yr.F <- cbind(IPM$nu.g.2.1,IPM$nu.g.2.2,IPM$nu.g.2.3,IPM$nu.g.2.4,IPM$nu.g.2.5,IPM$nu.g.2.6) 
+  nu.mean.F <- rowMeans(nu.yr.F)
+  
+  for (t in 1:n.yrs){ 
+    for (i in 1:iter){
+      gam[t,i] <- sample(IPM$gam.mean.2,1,replace=T)
+      p.cross[t,i] <- sample(p.cross.mean,1,replace=T) 
+    } #t
+  } #i
+  #Specify constant demographic rates from literature
+  s.M.hat <- s.F.hat <- 0.53
+  s.M.juv <- s.F.juv <- 0.57
+  p.M.juv <- 0.472268
+  g.M.juv <- 0.097732
+  p.F.juv <- 0.519252
+  g.F.juv <- 0.050748
+  s.M.av <- mean(s.M.ad)
+  s.F.av <- mean(s.F.ad)
+  clutch <- 2                                         #avg number of clutches per female per year 
+  clutch.size <- 6.9                                  #avg number of eggs per clutch per female per year 
+  s.egg <- 0.79
+  fert <- clutch * clutch.size * s.egg * 0.39 * (s.F.hat^.75)
+  fem.hatch.ratio <- c(1, 0.15, 1)
+  fem.hatch.ratio.LCI <- c(0.51, 0, 0.51)
+  
+  #Calculate stable age distribution for initial population sizes
+  Lefkovitch <- c(0,       0,       0,      0,       0,       fert*0.5,
+                  s.M.hat, p.M.juv, 0,      0,       0,       0, 
+                  0,       g.M.juv, s.M.av, 0,       0,       0,
+                  0,       0,       0,      0,       0,       fert*0.5, 
+                  0,       0,       0,      s.F.hat, p.F.juv, 0,
+                  0,       0,       0,      0,       g.F.juv, s.F.av)
+  terp <- matrix(Lefkovitch, nrow = 6, byrow = T)
+  terp_eigen <- eigen(terp)
+  stable_stage <- terp_eigen$vectors[,1]/sum(terp_eigen$vectors[,1]) 
+  stable_stage  <- as.numeric(stable_stage)
+  
+  Y.ad0 <- N.JIC.male #mean from model' 
+  X.ad0 <- N.JIC.fem #mean from model' 
+  Y.hat0 <- round((Y.ad0/stable_stage[3]) * stable_stage[1], 0)
+  Y.juv0 <- round((Y.ad0/stable_stage[3]) * stable_stage[2], 0) 
+  X.hat0 <- round((Y.ad0/stable_stage[3]) * stable_stage[4], 0) 
+  X.juv0 <- round((Y.ad0/stable_stage[3]) * stable_stage[5], 0)
+  
+  #Derived stable stage distribution from previous runs
+  stage.prop <- c(0.16212451, 0.23016752, 0.13783620, 0.16212451, 0.26327821, 0.04446905)
+  
+  #Initial abundances
+  Y.ad0 <- N.JIC.male #mean from model' 
+  X.ad0 <- N.JIC.fem #mean from model' 
+  Y.hat0 <- round((Y.ad0/stage.prop[3]) * stage.prop[1],0) 
+  Y.juv0 <- round((Y.ad0/stage.prop[3]) * stage.prop[2],0) 
+  X.hat0 <- round((Y.ad0/stage.prop[3]) * stage.prop[4],0) 
+  X.juv0 <- round((Y.ad0/stage.prop[3]) * stage.prop[5],0)
+  
+  Total0 <- Y.hat0 + Y.juv0 + Y.ad0 + X.hat0 + X.juv0 + X.ad0
+  N0 <- c(Y.hat0, Y.juv0, Y.ad0, X.hat0, X.juv0, X.ad0, Total0)
+  years <- c(1:(n.yrs + 1))
+  stages <- c("Y.hat","Y.juv","Y.ad","X.hat","X.juv","X.ad","N")
+  dimnames <- list(years,stages) 
+  N <- matrix(data = NA, nrow = n.yrs + 1, ncol = length(N0), dimnames = dimnames) 
+  N <- array(dim = c(length(N[,1]), length(N[1,]), iter, strat))
+  dim(N) #Check if dimensions are right (1=years, 2=stages, 3=iterations, 4=mgmt scenarios)
+  
+  ######Sensitivity analysis section#####
+  #Parameters to replace current model parameters (1-way)
+  #Parameters to replace current model parameters (2-way combinations) 
+  #gam, p.cross
+  
+  #--------------------------------------------------------------------------------------------------# 
+  ###Population Viability Analysis - stage-based model for 50 years, 9 management scenarios, and 1000 iterations per scenario### 
+  #--------------------------------------------------------------------------------------------------#
+  for (m in 1:strat){
+    for (i in 1:iter){
+      for (t in 1:n.yrs){
+        N[1,,i,m] <- N0                                                       #Initial abundances 
+        M.juv[t,,i,m] <- rmultinom(1, N[t,2,i,m], prob = c(p.M.juv,g.M.juv,(1 - p.M.juv - g.M.juv)))
+                                                                              #Juveniles into p and g classes
+        N[t+1,2,i,m] <- rbinom(1,N[t,1,i,m],s.M.hat) + M.juv[t,1,i,m]         #Juvs = new juvs + juvs that survived and stayed
+        N[t+1,3,i,m] <- rbinom(1,N[t,3,i,m],s.M.ad.yr[t,i,m]) + M.juv[t,2,i,m]#Ads = new ads + ads that survived and stayed
+        F.juv[t,,i,m] <- rmultinom(1,N[t,5,i,m],prob=c(p.F.juv,g.F.juv,(1-p.F.juv-g.F.juv))) #Juveniles into p and g classes
+        N[t+1,5,i,m] <- rbinom(1,N[t,4,i,m],s.F.hat) + F.juv[t,1,i,m]         #Juvs = new juvs + juvs that survived and stayed
+        N.F.cat[t,,i,m] <- rmultinom(1, N[t,6,i,m],prob=c(gam[t, i] * p.cross[t,i], gam[t,i] * (1- p.cross[t,i]),1 - gam[t,i])) #Ads into 3 classes: using JIC and cross, using JIC and nocross, and not using JIC
+        N.mgmt[t,i,m] <- rbinom(1, N.F.cat[t,1,i,m],p.mgmt[m])                #Crossers encounter mgmt area
+        N.block[t,i,m] <- rbinom(1, N.mgmt[t,i,m],p.block[m])                 #Crossers blocked by mgmt
+        N.cross[t,i,m] <- N.F.cat[t,1,i,m] - N.block[t,i,m]                   #Actual crossers 
+        N.nocross[t,i,m] <- N.F.cat[t,2,i,m] + N.block[t,i,m]                 #Actual no crossers
+        N.surv.cross[t,i,m] <- rbinom(1, N.cross[t,i,m],s.F.cross[t, i,m ])   #Crossers surviving 
+        N.surv.nocross[t,i,m] <- rbinom(1, N.nocross[t,i,m], s.F.nocross[t,i,m])#Noncrossers surviving
+        N.surv.nouser[t,i,m] <- rbinom(1, N.F.cat[t, 3, i, m], s.F.nocross[t,i,m])#Nonusers surviving
+        N[t+1,6,i,m] <- N.surv.cross[t,i,m] + N.surv.nocross[t,i,m] + N.surv.nouser[t,i,m] + F.juv[t, 2, i, m]
+        N.nester[t,i,m] <- N.surv.cross[t,i,m] + N.surv.nocross[t,i,m]        #Annual nesters on JIC 
+        N.nest[t,i,m] <- N.nester[t,i,m] * clutch                             #Accoutns for 2 clutches/female on average 
+        N.position[t,,i,m] <- rmultinom(1, N.nest[t,i,m], prob = position)    #Distributes pool of nesters into 100-m sections of JIC
+        for (p in 1:87){  #For each 100-m section, nests are distributed among 3 habitat types based on their proportions
+          N.nest.hab[t,p,i,m,] <- rmultinom(1, N.position[t,p,i,m], 
+                                            prob = c(prop.Open[p,m], prop.Hedge[p,m], prop.Box[p,m])) 
+          } #p
+        N.nest.O.tot[t,i,m] <- sum(N.nest.hab[t,,i,m,1])                      #Total nests on JIC in open hab 
+        N.nest.H.tot[t,i,m] <- sum(N.nest.hab[t,,i,m,2])                      #Total nests on JIC in hedge hab
+        N.nest.B.tot[t,i,m] <- sum(N.nest.hab[t,,i,m,3])                      #Total nests on JIC in boxes
+        N.nest.O.surv.pos[t,,i,m] <- rbinom(87, N.nest.hab[t,,i,m,1],prob = nest.survO[,m]) #position-and habitat-specific estimates of nest survival from companion modeling study 
+        N.nest.H.surv.pos[t,,i,m] <- rbinom(87, N.nest.hab[t,,i,m,2],prob = nest.survH[,m]) #position-and habitat-specific estimates of nest survival from companion modeling study 
+        N.nest.B.surv.pos[t,,i,m] <- rbinom(87, N.nest.hab[t,,i,m,3],prob = 0.963)#prob estimatedfrom field study
+        N.nest.O.surv[t,i,m] <- sum(N.nest.O.surv.pos[t,,i,m])
+        N.nest.H.surv[t,i,m] <- sum(N.nest.H.surv.pos[t,,i,m])
+        N.nest.B.surv[t,i,m] <- sum(N.nest.B.surv.pos[t,,i,m])
+        nest.success.O[t,i,m] <- ifelse(N.nest.O.tot[t,i,m] > 20, N.nest.O.surv[t,i,m]/N.nest.O.tot[t,i,m], NA)
+        nest.success.H[t,i,m] <- ifelse(N.nest.H.tot[t,i,m] > 20, N.nest.H.surv[t,i,m]/N.nest.H.tot[t,i,m], NA)
+        nest.success.B[t,i,m] <- ifelse(N.nest.B.tot[t,i,m] > 20, N.nest.B.surv[t,i,m]/N.nest.B.tot[t,i,m], NA)
+        N.nest.surv.hab[t,,i,m] <- c(N.nest.O.surv[t,i,m], N.nest.H.surv[t,i,m], N.nest.B.surv[t,i,m])
+        #Surviving nests per habitat
+        N.eggs.hab[t,,i,m] <- rpois(3 ,N.nest.surv.hab[t,,i,m] * clutch.size)#Eggs per habitat 
+        N.eggs.surv.hab[t,,i,m] <- rbinom(3, N.eggs.hab[t,,i,m],(s.egg * (s.M.hat^0.75))) #Surviving eggs per habitat
+        
+        N.F.new[t,,i,m] <- rbinom(3, N.eggs.surv.hab[t,,i,m], c(fem.hatch.ratio[1], fem.hatch.ratio[2], fem.hatch.ratio[3])) #New female hatchlings per habitat
+        N.M.new[t,,i,m] <- N.eggs.surv.hab[t,,i,m] - N.F.new[t,,i,m]            #New male hatchlings per habitat
+        N[t+1,1,i,m] <- sum(N.M.new[t,,i,m])                                    #New male hatchlings
+        N[t+1,4,i,m] <- sum(N.F.new[t,,i,m])                                    #New female hatchlings 
+        N[t+1,7,i,m] <- sum(N[t + 1, 1:6, i, m])                                #Annual total abundance
+        N[t+1,7,i,m] <- (N[t,7,i,m] > 49) * N[t + 1,7,i,m]                      #Makes N= 0 if falls below 50 (quasi-extinction threshold)
+        lambda[t,i,m] <- N[t + 1,7,i,m]/N[t,7,i,m]                              #Annual population growth rate
+        lambda[lambda[,i,m]  == 0,i,m] <- NA                                    #Replaces any 0s with NAs
+        crash[i,m] <- min(which(is.na(lambda[,i,m])))                           #Function to get time of crash (lambda=0 or NA) in each simulation 
+        crash[crash  == Inf] <- 51
+      } #t
+      mean.lambda.iter[i,m] <-  ifelse(crash[i,m] > 20,
+                                       mean(lambda[21:(crash[i,m]-1), i, m]),next)#Mean population growth rate per iteration
+      perc.change.iter[i,m] <- N[51, 7, i, m]/N[1, 7, i, m]                     #Percentage change in abundance from beginning of study
+      persist[i,m] <- (N[51, 7, i, m] > 0) * 1                                  #Indicator (0 or 1) if population persisted at year 50 
+      persistence[i,m] <- mean(persist[i,m])
+    } #i
+    mean.lambda.mgmt[m] <- mean(mean.lambda.iter[,m], na.rm = T)                #Mean population growth rate per strategy
+    perc.change.mgmt[m] <- mean(perc.change.iter[,m])                           # Mean percentage change in abundance from beginning of study
+    persistence.prob[m] <- mean(persist[,m], na.rm = T)                         # Mean persistence probability per strategy
+  } #m
+  ###End PVA Model###
+  
+  persist[is.na(persist)] <- 0                                                  #May need if NAs appear in persist 
+  #Results - main PVA
+  Lambda.PVA <- matrix(mean.lambda.mgmt, 9, 1)
+  Persist.PVA <- matrix(persistence.prob, 9, 1)
+  #########################End of Code#########################

@@ -1,0 +1,269 @@
+---
+title: "Dissertation Mock up figures"
+author: "Michelle DePrenger-Levin"
+date: "November 7, 2019"
+output: html_document
+---
+
+```{r}
+library(raster)
+library(gstat)
+library(virtualspecies)
+library(DiagrammeR)
+
+```
+
+# Spatial modeling: forecasting and descriptive    
+gold standard    
+when falls apart for rare plants    
+
+
+<http://santiago.begueria.es/2010/10/generating-spatially-correlated-random-fields-with-r/>
+```{r}
+xy <- expand.grid(1:100, 1:100)
+names(xy) <-  c('x','y')
+# where formula defines the dependent variable (z) as a linear model of independent variables. For ordinary and simple kriging we can use the formula z~1; for simple kriging it is necessary to define a beta parameter too (see below); for universal kriging, if z is linearly dependent on x and y use the formula z~x+y. We are using simple kriging here.
+# locations define the data coordinates, e.g. ~x+y in our case here. 
+# dummy is a logical value, and it needs to be TRUE for unconditional simulation. 
+# beta is used only for simple kriging, and is a vector with the trend coefficients (including an intercept); 
+# if no independent variables are defined the model only contains an intercept, i.e. the simple kriging mean. model defines the variogram model, as defined by a call to vgm. vgm allows defining the (partial) sill, range and nugget paramaters, as well as the variogram model type (e.g. exponential, gaussian, spherical, etc). Anisotropy can also be used. 
+# nmax defines the number of nearest observations that should be used for a kriging prediction or simulation.
+
+g.dummy <- gstat(formula=z~1, locations=~x+y, dummy=T, beta=1, model=vgm(psill=0.025, range=5, model='Exp'), nmax=20)
+
+yy <- predict(g.dummy, newdata=xy, nsim=4)
+gridded(yy) = ~x+y
+spplot(obj=yy[1])
+
+spplot(obj=yy[2])
+
+```
+
+
+```{r}
+plot(yy[1])
+
+g.dummy2 <- gstat(formula=z~1, locations=~x+y, dummy=T, beta=3, model=vgm(psill=0.025, range=20, model='Exp'), nmax=20)
+
+yy2 <- predict(g.dummy2, newdata=xy, nsim=4)
+gridded(yy2) = ~x+y
+
+g.dummy3 <- gstat(formula=z~1+x+y, locations=~x+y, dummy=T, beta=c(1,0.01,0.005), 
+                  model=vgm(psill=0.025, range=50, model='Exp'), nmax=20)
+
+yy3 <- predict(g.dummy3, newdata=xy, nsim=4)
+gridded(yy3) = ~x+y
+
+spplot(yy[1])
+spplot(yy2[1])
+spplot(yy3[1])
+```
+
+
+```{r}
+# Different sample sizes
+simsp1 <- data.frame(x = runif(10, 1, 99), y = runif(10, 1,99) )
+simsp10 <- data.frame(x = runif(100, 1, 99), y = runif(100, 1,99) )
+
+
+
+plot(yy[2])
+points(simsp1, col = "black", pch = 20)
+
+
+plot(yy3[3])
+points(simsp1, col = "black", pch = 20)
+
+
+# make points in relation to each layer? 
+yy[1]@data$sim1
+```
+
+
+
+
+
+
+
+
+PVA temporal modeling demograpahics    
+MatrixSplit: Divided means A broken into process-based submatrices U (survival), F (sexual reproduction), and C (clonal reproduction)
+```{r}
+
+library(popdemo)
+
+load("C:/Users/deprengm/OneDrive - Denver Botanic Gardens/P drive/My Documents/UCDenver_phd/Dissertation/PVA/Paniw etal/patterns_temporal_autocorrelation-master/COMPADRE_v.4.0.0.RData")
+
+# example from Wall et al. 2012 
+table(compadre$metadata$SpeciesAccepted) # how many matrixes there are A
+compadre$mat[compadre$metadata$SpeciesAccepted == "Astragalus michauxii"]
+compadre$metadata[compadre$metadata$SpeciesAccepted == "Astragalus michauxii",]
+
+```
+
+
+Get the A matrices   
+```{r}
+AsMi_A <- lapply(compadre$mat[compadre$metadata$SpeciesAccepted == "Astragalus michauxii"], '[[', 1)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+My attempts at creating a simulated landscape, just use above
+```{r}
+
+r4 <- r3 <-  r2 <- r1 <- raster(ncol=100, nrow=100) # looks like it's by row
+
+# r1 will be the yes or no of presence points based on the 'environmental' layers r2 and r3
+r2[] <- rnorm(ncell(r2), mean = 100, sd = 50) # no autocorrelation
+
+# Add some autocorrelation
+pickcell <- matrix(1:10000, nrow = 100, byrow = TRUE)
+pickcell[4,5]  # 305
+pickcell[3,5]
+which(pickcell==104, arr.ind = TRUE)
+
+pickcell[which(pickcell==104, arr.ind = TRUE)]
+
+r3[] <- 1:10000
+# r2[] <- calc(r2, function(x) 
+#   if((which(pickcell==x, arr.ind = TRUE)[1]>10 & which(pickcell==x, arr.ind = TRUE)[2]>10) &
+#      (which(pickcell==x, arr.ind = TRUE)[1]<90 & which(pickcell==x, arr.ind = TRUE)[2]<90)){
+#     rnorm(1, mean = x, sd = )
+#   } else {
+#       rnorm(1, mean = matrix(r3@data@values, nrow = 100, byrow = TRUE), sd = 50)
+#     }
+
+data.frame(matrix(r2@data@values, nrow=100))
+# 152.0787853
+
+x <- 0
+repeat {
+  x <- x+1
+  startval <- which(pickcell==sample(1:10000, 1), arr.ind = TRUE)
+  r2[startval]
+if(x=100){
+  break
+}
+  }
+
+
+
+# in relation to another measure
+beta1 <- 1
+int <- 100
+r3[] <- rnorm(ncell(r3), mean = 10, sd = 20)
+r4[] <- rlnorm(ncell(r4), meanlog = 0, sdlog = 1)
+
+plot(r2)
+
+r1[] <- rbinom(ncell(r1), ) 
+
+```
+
+
+Population viability modeling: forecasting and descriptive
+gold standard
+when falls apart for rare plants
+
+
+
+
+Example using PVA for predicting impact of seed harvest
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Verision 1: pre 2019-12-01 December 
+
+Model uncertainty
+1. pick a threshold  
+2. model the impact of spatial uncertanty across a landscape where there is varying environemntal differences and the scale of landscape variables is near reality vs. the spatial range of rare species
+3. various levels of autocorrelated environmental variables
+
+```{r}
+
+GS <- runif(100, min=100, max = 50000)
+B1 <- 10000 #intercept
+B2 <- -0.6 #slope
+Uncertainty <- (B1 + GS*B2)
+UnJit <- Uncertainty*rnorm(100, mean = .5, sd = .15)
+
+plot(GS,jitter(Uncertainty,amount = 0.0005), xlab="Geographic distribution", ylab= "Uncertainty")
+plot(GS, (UnJit+abs(min(UnJit)))/max((UnJit+abs(min(UnJit)))), xlab="Geographic distribution", ylab= "Uncertainty")
+```
+
+Triangle plot for rarity
+```{r}
+library(ade4)
+```
+
+
+```{r}
+#Environmental space is correlated to range
+Environmental_Specificity <- jitter(2 + GS*0.91, amount = 100)
+
+# local abundance low, more likely to miss if in clumps so if more environemtal habitat specificity, then shoudl be more lower samples, less detection (Dennett 2018)
+Local_Abundance <- jitter(1 + ES*0.1, amount = 100)
+Geographic_Range <- GS
+
+raretaxa <- data.frame(Geographic_Range, Environmental_Specificity, Local_Abundance)
+
+triangle.plot(raretaxa) # label = c("Geographic range","Habitat specificity","Local Abundance"))
+
+```
+
+
+
+
+
+
+
+

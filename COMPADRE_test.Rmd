@@ -1,0 +1,22 @@
+
+
+
+```{r}
+# load("C:/Users/deprengm/Downloads/COMPADRE_v.4.0.1.RData")
+load("C:/Users/deprengm/OneDrive - Denver Botanic Gardens/P drive/My Documents/UCDenver_phd/Dissertation/PVA/Paniw etal/patterns_temporal_autocorrelation-master/COMPADRE_v.4.0.0.RData")
+
+str(compadre)
+table(compadre$metadata$Genus)
+
+table(compadre$metadata$DicotMonoc)
+
+table(compadre$metadata$Journal)
+
+compadre$matrixClass[[1]]
+compadre$mat[[1]]
+compadre$metadata$MatrixSplit[[1]]
+table(compadre$metadata$Authors[grep("Menges",compadre$metadata$Authors)])
+table(compadre$metadata$Genus[grep("Menges",compadre$metadata$Authors)])
+
+compadre$mat["Menges" %in% compadre$metadata$Authors & compadre$metadata$Genus == "Pedicularis" ]
+```
