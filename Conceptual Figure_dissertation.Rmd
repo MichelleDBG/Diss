@@ -11,6 +11,13 @@ library(gstat)
 library(virtualspecies)
 library(DiagrammeR)
 
+# install.packages("BiocManager")
+# BiocManager::install("Rgraphviz")
+# 
+# library(Graphviz)
+
+library(diagram)
+
 ```
 
 # Spatial modeling: forecasting and descriptive    
@@ -86,7 +93,60 @@ yy[1]@data$sim1
 
 
 
-PVA temporal modeling demograpahics    
+# PVA temporal modeling demograpahics    
+
+DiagrammeR
+```{r}
+# define nodes dataframe
+nodes <- create_node_df(n = 8, 
+                        type = "lower",
+                        style = "filled",
+                        color = "teal", 
+                        shape = "circle", 
+                        data = c(3.5, 2.6, 9.4, 2.7))
+
+# define edges dataframe
+edges <- create_edge_df(from = c(1, 2, 3, 3),
+                        to = c(2, 4, 4, 2))
+
+# create graph
+my_graph <- create_graph(nodes_df = nodes, edges_df = edges)
+
+# print graph
+render_graph(my_graph)
+
+
+```
+
+diagram   
+<https://cran.r-project.org/web/packages/diagram/vignettes/diagram.pdf>    
+```{r}
+m <- matrix(nrow=8, ncol = 8, byrow = TRUE, data = c(
+  # P  f  s  g  dd  sz  c  m
+   0, 0, 0, 0, 0, 0, 0, 0,
+   1, 0, 0, 0, 0, 0, 0, 0,
+   2, 0, 0, 0, 0, 0, 0, 0,
+   3, 0, 0, 0, 0, 0, 0, 0,
+   4, 0, 0, 0, 0, 0, 0, 0,
+   0, 5, 6, 7, 0, 0, 0, 0,
+   0, 8, 9,10, 0, 0, 0, 0,
+   0,11,12,13, 0, 0, 0, 0
+   )) 
+names <- c("Population trends", "fecundity", "survival", "growth", "density dependence",
+           "size", "climate", "management")
+
+# m[2,1] <- m[3,1] <- m[4,1] <- m[5,1] <- m[6,2] <- m[6,3] <- m[6,4] <- 
+#   m[7,2] <- m[7,3] <- m[7,4] <- 
+#   m[8,2] <- m[8,3] <- m[8,4] <- "lm" 
+plotmat(m, pos = c(1, 4, 3), curve = 0, name = names, 
+        box.type = "square", cex.txt = 0.5, box.prop = 0.3,
+        arr.type = "triangle", arr.pos = 0.5, prefix = "m")
+
+
+```
+
+
+
 MatrixSplit: Divided means A broken into process-based submatrices U (survival), F (sexual reproduction), and C (clonal reproduction)
 ```{r}
 
