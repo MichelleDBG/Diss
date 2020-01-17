@@ -182,68 +182,6 @@ AsMi_A <- lapply(compadre$mat[compadre$metadata$SpeciesAccepted == "Astragalus m
 
 
 
-
-
-
-
-
-
-
-
-
-My attempts at creating a simulated landscape, just use above
-```{r}
-
-r4 <- r3 <-  r2 <- r1 <- raster(ncol=100, nrow=100) # looks like it's by row
-
-# r1 will be the yes or no of presence points based on the 'environmental' layers r2 and r3
-r2[] <- rnorm(ncell(r2), mean = 100, sd = 50) # no autocorrelation
-
-# Add some autocorrelation
-pickcell <- matrix(1:10000, nrow = 100, byrow = TRUE)
-pickcell[4,5]  # 305
-pickcell[3,5]
-which(pickcell==104, arr.ind = TRUE)
-
-pickcell[which(pickcell==104, arr.ind = TRUE)]
-
-r3[] <- 1:10000
-# r2[] <- calc(r2, function(x) 
-#   if((which(pickcell==x, arr.ind = TRUE)[1]>10 & which(pickcell==x, arr.ind = TRUE)[2]>10) &
-#      (which(pickcell==x, arr.ind = TRUE)[1]<90 & which(pickcell==x, arr.ind = TRUE)[2]<90)){
-#     rnorm(1, mean = x, sd = )
-#   } else {
-#       rnorm(1, mean = matrix(r3@data@values, nrow = 100, byrow = TRUE), sd = 50)
-#     }
-
-data.frame(matrix(r2@data@values, nrow=100))
-# 152.0787853
-
-x <- 0
-repeat {
-  x <- x+1
-  startval <- which(pickcell==sample(1:10000, 1), arr.ind = TRUE)
-  r2[startval]
-if(x=100){
-  break
-}
-  }
-
-
-
-# in relation to another measure
-beta1 <- 1
-int <- 100
-r3[] <- rnorm(ncell(r3), mean = 10, sd = 20)
-r4[] <- rlnorm(ncell(r4), meanlog = 0, sdlog = 1)
-
-plot(r2)
-
-r1[] <- rbinom(ncell(r1), ) 
-
-```
-
-
 Population viability modeling: forecasting and descriptive
 gold standard
 when falls apart for rare plants
@@ -253,8 +191,88 @@ when falls apart for rare plants
 
 Example using PVA for predicting impact of seed harvest
 
+# Zero-inflated data    
+When more zeros than what will fit a standard distribution     
+Zero-inflated Poisson regression     
+<https://fukamilab.github.io/BIO202/04-C-zero-data.html>     
+Two-part models wher ethe count process cannot produce zeros (truncated) vs. mixture models which distriguish between true and false zeros (at least statistically)     
+set up glm with random effect x|g where g is the grouping factor    
+
+     1. 1|group for random intercept     
+     2. time|group for random variation in slopes through time across groups   
+     3. 1|site/group for nested random effects group within site    
+     4. (1|group) + (1|year) crossed random effects (group and year)    
+     
+Pick error distribution with family: binomial, gaussian, poisson, Gamma or nbinom2, beta_family(), betabinomial ...   
+Can use function name for base or list for others like family=list(family="nbinom2", link="log")      
+Can select a zero-inflaction model with the ziformula argument   
+Can select a dispersion model with fixed effects   
+```{r}
+# Brook et al. 2019 Conservation Biology used glmmTMB  
+library(glmmTMB) # <https://cran.r-project.org/web/packages/glmmTMB/vignettes/glmmTMB.pdf> 
+
+# repeated measures are used as random effect.  
+# zero-inflated Poisson model with single zero-inflation paramenter applied to all observations = (ziformula~1). To exclude zero-inflation (is default but) ziformula~0 
+# fit_zipoisson <- glmmTMB(NCalls~(FT+ArrivalTime)*SexParent+   # would work for number of indiviudals in class or age
+#                            offset(log(BroodSize))+(1|Nest),   # the offset allows for use of Poisson response; log(BroodSize) may be to add the assumption that total number of calls is proportional to the brood size
+#                          data=Owls,
+#                          ziformula=~1,
+#                          family=poisson)
+```
+Used in Brook et al. 2019 response variabile as a mixture of Bernoulli [0-1] probability of recovering a positive count, Poisson process for positive or negative trend in the count.   
+Hypothesis: increased frequency of zeros through time comes from both declining abundance or declining effort (so not reported, not able to be seen and counted).      
+
+    1. If more zeros over time are due to declining abundance, Poisson model would prouce a negative slope and zero-inflated model a positive slope - because abundance down (more zeros) but effort (as harvest here) would be increasing and compensate.       
+    2. If more zeros are due to declining effort then both models would yeild negative slopes. 
 
 
+
+
+
+<https://stats.idre.ucla.edu/r/dae/zip/>    
+```{r}
+library(ggplot2)
+library(pscl)
+library(boot)
+
+# Example is measuring things correlated to how many fish caught but many people didn't catch fish, other people didn't fish at all, so zeros from both processes 
+zinb <- read.csv("https://stats.idre.ucla.edu/stat/data/fish.csv")
+zinb <- within(zinb, {
+    nofish <- factor(nofish)
+    livebait <- factor(livebait)
+    camper <- factor(camper)
+})
+
+# histogram with x axis in log10 scale
+ggplot(zinb, aes(count))+
+  geom_histogram()+
+  scale_x_log10()+
+  theme_bw()
+
+```
+
+Ways to deal with zero inflation   
+       1. Zero-inflated negative binomial regression: does better with over dispersed data (vaiance much larger than the mean)      
+       2. Ordinary count: Poisson or negative binomial if there are no excess zeros      
+       3. OLS regression: but not good when non-normal distribution     
+       4. Zero-inflated Poisson    
+
+```{r}
+summary(m1 <- zeroinfl(count ~ child + camper | persons, data = zinb))
+# Count model are the Poisson regression coefficients 
+# Inflation model with logi coefficients for predicting excess zeros
+# the p-values say it fits better than the null model
+
+```
+
+to determine if the zero-inflated model is an improvement over standard Poisson regression, compare with Vuong test
+```{r}
+summary(p1 <- glm(count ~ child + camper, family = poisson, data = zinb))
+
+vuong(p1, m1) # compares the zero-inflated model with ordinary Poisson regression model. Vuong test for non-nested models complaints. Should just do a real AIC or maybe just like other AIC the non-nested comparisons are fine
+
+# Confidence intervals for parameters and exponentiated parameters using bootstrapping, use 'boot' package. incidne trisk rations for Poisson model, odds ratio for zero inflation model. 
+```
 
 
 
