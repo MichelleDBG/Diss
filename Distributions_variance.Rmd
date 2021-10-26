@@ -1,0 +1,11 @@
+---
+title: "Distributions"
+author: "Michelle DePrenger-Levin"
+date: "10/26/2021"
+output: html_document
+---
+
+Kendall 1998   
+The beta-binomial distribution
+Beta distribution $x^\alpha - 1 (1-x)^{\beta-1}/Beta(\alpha,\beta)$
+
